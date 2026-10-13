@@ -679,67 +679,192 @@ tbody tr:hover { background: #f8fbfe; }
 .toast b { display: block; margin-bottom: 2px; font-size: 12px; }
 @keyframes toastIn { from { opacity: 0; transform: translateY(10px); } }
 
-/* Auth Screen */
-.auth-page {
-  min-height: 100vh;
-  display: grid;
-  grid-template-columns: minmax(420px,1.15fr) minmax(390px,.85fr);
-  background: #fff;
-}
-.auth-visual {
-  min-height: 100vh;
-  position: relative;
-  overflow: hidden;
-  padding: 46px 54px;
-  display: flex;
-  flex-direction: column;
-  color: #fff;
-  background: linear-gradient(125deg,rgba(0,134,255,.13),transparent 45%), radial-gradient(circle at 80% 85%,rgba(0,134,255,.42),transparent 37%), var(--navy);
-}
-.auth-brand { display: flex; align-items: center; gap: 12px; }
-.auth-copy { margin: auto 0; max-width: 630px; }
-.auth-kicker { display: inline-block; margin-bottom: 22px; color: #75bfff; font-size: 10px; font-weight: 850; letter-spacing: 2.2px; }
-.auth-copy h1 { margin: 0; color: #fff; font-size: clamp(48px,5.2vw,78px); line-height: .98; letter-spacing: -4px; }
-.auth-copy h1 em { color: var(--brand); font-style: normal; }
-.auth-copy p { max-width: 430px; margin: 28px 0 0; color: #a9bfd2; font-size: 15px; line-height: 1.65; }
-.auth-stats { display: flex; gap: 38px; }
-.auth-stats span { color: #7591a8; font-size: 9px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; }
-.auth-stats strong { display: block; margin-bottom: 4px; color: #fff; font-size: 19px; letter-spacing: -.5px; }
+/* ==========================================================================
+   AJUSTES DE RESPONSIVIDADE (MOBILE & TABLET)
+   ========================================================================== */
 
-.auth-form-wrap { display: grid; place-items: center; padding: 42px; background: linear-gradient(135deg,#fff,#f5f9fc); }
-.login-card { width: min(390px,100%); }
-.login-card h2 { margin: 5px 0 8px; font-size: 32px; letter-spacing: -1.3px; }
-.login-intro { margin: 0 0 28px; color: var(--muted); font-size: 12px; line-height: 1.6; }
-.login-card .field { margin-bottom: 16px; }
-.login-card .field input { height: 48px; font-size: 12px; }
-.password-field { position: relative; }
-.password-field input { padding-right: 60px; }
-.password-field button { position: absolute; right: 8px; top: 8px; height: 32px; border: 0; padding: 0 8px; color: var(--brand); background: transparent; font-size: 10px; font-weight: 800; }
-.login-submit { width: 100%; height: 48px; margin-top: 7px; }
-
+/* Tablets e Telas Médias (<= 850px) */
 @media (max-width: 850px) {
-  .auth-page { grid-template-columns: 1fr; }
-  .auth-visual { min-height: 280px; padding: 30px 28px; }
-  .auth-stats { display: none; }
-  .app-shell { display: block; padding-bottom: 68px; }
-  .sidebar { display: none; }
-  .topbar { height: 70px; padding: 0 18px; }
-  .page { padding: 22px 15px 32px; }
-  .kpi-grid { grid-template-columns: repeat(2,1fr); }
-  .content-grid { grid-template-columns: 1fr; }
-  .management-grid { grid-template-columns: 1fr; }
-  .mobile-nav {
-    position: fixed;
-    z-index: 50;
-    display: grid;
-    grid-template-columns: repeat(4,1fr);
-    inset: auto 0 0;
-    height: 66px;
-    padding: 7px 8px 8px;
-    border-top: 1px solid var(--line);
-    background: rgba(255,255,255,.96);
-    backdrop-filter: blur(12px);
-  }
-  .mobile-nav button { border: 0; border-radius: 10px; background: transparent; color: #788b9d; font-size: 8px; font-weight: 750; }
-  .mobile-nav button.active { color: var(--brand); background: #eaf5ff; }
+    .app-shell {
+        display: block;
+        padding-bottom: 75px; /* Espaço para não cobrir o conteúdo com a navbar inferior */
+    }
+
+    .sidebar {
+        display: none; /* Oculta a sidebar do desktop */
+    }
+
+    .main {
+        grid-column: auto;
+    }
+
+    .topbar {
+        height: 64px;
+        padding: 0 16px;
+        position: sticky;
+        top: 0;
+        z-index: 20;
+    }
+
+        .topbar h1 {
+            font-size: 17px;
+        }
+
+    .live-pill {
+        display: none;
+    }
+
+    .page {
+        padding: 16px 12px 32px;
+    }
+
+    /* Grid do Dashboard */
+    .kpi-grid {
+        grid-template-columns: repeat(2, 1fr) !important;
+        gap: 10px;
+    }
+
+    .content-grid {
+        grid-template-columns: 1fr;
+    }
+
+    /* Menu de Navegação Inferior (Mobile) */
+    .mobile-nav {
+        position: fixed;
+        z-index: 90;
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        inset: auto 0 0;
+        height: 64px;
+        padding: 6px;
+        border-top: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.98);
+        backdrop-filter: blur(12px);
+    }
+
+        .mobile-nav button {
+            border: 0;
+            border-radius: 10px;
+            background: transparent;
+            color: #788b9d;
+            font-size: 9px;
+            font-weight: 750;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+            .mobile-nav button.active {
+                color: var(--brand);
+                background: #eaf5ff;
+            }
+
+        .mobile-nav svg {
+            width: 20px;
+            height: 20px;
+            margin-bottom: 2px;
+        }
+
+    /* Tabelas Responsivas com Scroll Lateral */
+    .table-wrap {
+        width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    table {
+        min-width: 600px; /* Garante que as colunas mantenham o alinhamento no scroll */
+    }
+}
+
+/* Smartphones (<= 520px) */
+@media (max-width: 520px) {
+    /* Topbar Simplificada */
+    .top-actions .secondary-btn {
+        display: none;
+    }
+
+    .top-actions .primary-btn {
+        padding: 8px 12px;
+        font-size: 11px;
+    }
+
+    .logout-btn span {
+        display: none; /* Mantém apenas o ícone de logout no celular */
+    }
+
+    .logout-btn {
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        justify-content: center;
+    }
+
+    /* Ajustes dos Cards de KPI */
+    .kpi-grid {
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+    }
+
+    .kpi-card {
+        min-height: 105px;
+        padding: 12px;
+    }
+
+    .kpi-value {
+        font-size: 22px;
+        margin: 8px 0 4px;
+    }
+
+    /* Grid de Docas (Inbound) */
+    .inbound-grid {
+        grid-template-columns: repeat(2, 1fr) !important; /* 2 colunas para melhor aproveitamento */
+        gap: 10px;
+    }
+
+    .inbound-card {
+        aspect-ratio: auto;
+        padding: 14px;
+    }
+
+    .inbound-card-head strong {
+        font-size: 22px;
+    }
+
+    .inbound-card-data {
+        gap: 6px;
+        padding: 8px 0;
+    }
+
+        .inbound-card-data > div {
+            grid-template-columns: 50px 1fr;
+            gap: 4px;
+        }
+
+    /* Modais e Formulários */
+    .overlay {
+        padding: 10px;
+        align-items: flex-end; /* Abre estilos 'Bottom Sheet' no mobile */
+    }
+
+    .modal {
+        max-height: 85vh;
+        border-radius: 18px 18px 0 0;
+    }
+
+    .form-grid {
+        grid-template-columns: 1fr !important; /* Passa inputs para coluna única */
+        gap: 10px;
+    }
+
+    .modal-actions {
+        flex-direction: column-reverse;
+    }
+
+        .modal-actions .primary-btn,
+        .modal-actions .secondary-btn {
+            width: 100%;
+            height: 44px;
+        }
 }
