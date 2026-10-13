@@ -21,3 +21,4 @@ Thumbs.db
 # Logs do servidor
 logs/
 *.log.vs/ 
+".vs/" 
