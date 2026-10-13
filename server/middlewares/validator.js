@@ -28,30 +28,29 @@ function cleanText(value, max = 120) {
 }
 
 function validateRecord(input) {
-  const record = {
-    id: `R-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
-    data: cleanText(input.data, 40),
-    origem: cleanText(input.origem),
-    doca: cleanText(input.doca, 12).replace(/\D/g, "") || "—",
-    motorista: cleanText(input.motorista),
-    placa: cleanText(input.placa, 10).toUpperCase(),
-    volumetria: Number(input.volumetria) || 0,
-    inicio: input.inicio ? cleanText(input.inicio, 40) : null,
-    fim: null,
-    sla: Number(input.sla),
-    conferente: cleanText(input.conferente) || "—",
-    status: cleanText(input.status, 30) || "Em Trânsito",
-    source: "server"
-  };
+    const record = {
+        id: `R-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
+        data: cleanText(input.data, 40),
+        origem: cleanText(input.origem),
+        doca: cleanText(input.doca, 12).replace(/\D/g, "") || "—",
+        motorista: cleanText(input.motorista) || "—", // Permite vazio (Motorista opcional)
+        placa: cleanText(input.placa, 10).toUpperCase() || "—", // Permite vazio (Placa opcional)
+        volumetria: Number(input.volumetria) || 0, // Volumetria opcional
+        inicio: input.inicio ? cleanText(input.inicio, 40) : null,
+        fim: null,
+        sla: Number(input.sla) || 60, // Força SLA padrão de 60 minutos
+        conferente: cleanText(input.conferente) || "—",
+        status: cleanText(input.status, 30) || "Em Trânsito",
+        source: "server"
+    };
 
   if (!record.data || Number.isNaN(new Date(record.data).getTime())) throw new Error("Data inválida");
-  if (!record.origem || !record.motorista || !record.placa) throw new Error("Campos obrigatórios ausentes");
-  if (!/^[A-Z0-9-]{7,8}$/.test(record.placa)) throw new Error("Placa inválida");
-  if (!Number.isFinite(record.volumetria) || record.volumetria < 0 || (record.status === "Em descarga" && record.volumetria < 1)) throw new Error("Volumetria inválida");
-  if (!Number.isFinite(record.sla) || record.sla < 1) throw new Error("SLA inválido");
+  if (!record.origem) throw new Error("A origem é obrigatória");
+  if (record.placa !== "—" && !/^[A-Z0-9-]{7,8}$/.test(record.placa)) throw new Error("Placa inválida");
+  if (!Number.isFinite(record.volumetria) || record.volumetria < 0) throw new Error("Volumetria inválida");
   if (!["Em Trânsito", "Aguardando", "Em descarga"].includes(record.status)) throw new Error("Status inválido");
 
-  return record;
+    return record;
 }
 
 module.exports = {

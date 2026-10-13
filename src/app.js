@@ -200,25 +200,26 @@ document.addEventListener("submit", async event => {
       toast("Acesso não autorizado", error.message);
     }
   }
-  if (event.target.id === "record-form") {
-    event.preventDefault();
-    const form = new FormData(event.target);
-    const status = form.get("status");
-    const record = {
-      id: `R-${Date.now().toString().slice(-6)}`,
-      data: new Date(form.get("data")).toISOString(),
-      origem: String(form.get("origem")).trim(),
-      doca: form.get("doca") || "—",
-      motorista: String(form.get("motorista")).trim(),
-      placa: String(form.get("placa")).trim().toUpperCase(),
-      volumetria: Number(form.get("volumetria")),
-      inicio: status === "Em descarga" ? new Date().toISOString() : null,
-      fim: null,
-      sla: Number(form.get("sla")),
-      conferente: String(form.get("conferente") || "—").trim(),
-      status,
-      source: "local"
-    };
+    if (event.target.id === "record-form") {
+        event.preventDefault();
+        const form = new FormData(event.target);
+        const status = form.get("status");
+
+        const record = {
+            id: `R-${Date.now().toString().slice(-6)}`,
+            data: new Date(form.get("data")).toISOString(),
+            origem: String(form.get("origem")).trim(),
+            doca: form.get("doca") || "—",
+            motorista: String(form.get("motorista") || "—").trim(), // Permite motorista vazio
+            placa: String(form.get("placa") || "—").trim().toUpperCase(), // Permite placa vazia
+            volumetria: Number(form.get("volumetria")) || 0, // Permite volumetria vazia (0)
+            inicio: status === "Em descarga" ? new Date().toISOString() : null,
+            fim: null,
+            sla: Number(form.get("sla")) || 60, // <--- ADICIONADO O || 60 AQUI
+            conferente: String(form.get("conferente") || "—").trim(),
+            status,
+            source: "local"
+        };
     if (state.apiOnline) {
       try {
         const payload = await api("/api/records", {

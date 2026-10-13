@@ -3,18 +3,52 @@
 function pad(n) { return String(n).padStart(2, "0"); }
 
 function openNewRecord(preselectedDock = "") {
-  const localValue = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-  document.querySelector("#modal-root").innerHTML = `<div class="overlay" data-action="close-modal"><form class="modal" id="record-form" onclick="event.stopPropagation()"><div class="modal-head"><div><h2>Iniciar recebimento</h2><p>Registre o veículo e os dados da descarga na doca ${dockLabel(preselectedDock)}.</p></div><button type="button" class="close-btn" data-action="close-modal">×</button></div><div class="modal-body"><div class="form-grid">
-    <div class="field"><label>Data e hora previstas *</label><input required name="data" type="datetime-local" value="${localValue}"></div>
-    <div class="field"><label>CD / Hub de origem *</label><input required name="origem" placeholder="Ex.: CD Guarulhos"></div>
-    <div class="field"><label>Motorista *</label><input required name="motorista" placeholder="Nome completo"></div>
-    <div class="field"><label>Placa do veículo *</label><input required maxlength="8" name="placa" placeholder="ABC-1D23" style="text-transform:uppercase"></div>
-    <div class="field"><label>Volumetria *</label><input required min="1" name="volumetria" type="number" placeholder="Quantidade de volumes"><p class="helper">Obrigatória para iniciar o recebimento.</p></div>
-    <div class="field"><label>Doca *</label><select required name="doca"><option value="">Selecione</option>${Array.from({ length: 18 }, (_, i) => `<option value="${i + 1}" ${String(i + 1) === String(preselectedDock) ? "selected" : ""}>${pad(i + 1)}</option>`).join("")}</select></div>
-    <div class="field"><label>SLA de descarga (min) *</label><input required min="1" name="sla" type="number" value="60"></div>
-    <div class="field"><label>Conferente / Responsável</label><input name="conferente" value="${esc(state.user?.name || state.user?.username)}" readonly style="background:#f3f6fa;color:#8396a7;"></div>
-    <div class="field full"><label>Status inicial</label><select name="status"><option selected>Em descarga</option><option>Aguardando</option><option>Em Trânsito</option></select><p class="helper">O horário de início será registrado automaticamente.</p></div>
-  </div></div><div class="modal-actions"><button type="button" class="secondary-btn" data-action="close-modal">Cancelar</button><button class="primary-btn" type="submit">Salvar e iniciar</button></div></form></div>`;
+    const localValue = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    // Usa o nome completo se existir, senão usa o username (login)
+    const conferenteNome = state.user?.name || state.user?.username || "—";
+
+    $("#modal-root").innerHTML = `<div class="overlay" data-action="close-modal">
+  <form class="modal" id="record-form" onclick="event.stopPropagation()">
+      <div class="modal-head">
+          <div><h2>Iniciar recebimento</h2><p>Registre o veículo e os dados da descarga na doca ${dockLabel(preselectedDock)}.</p></div>
+          <button type="button" class="close-btn" data-action="close-modal">×</button>
+      </div>
+      <div class="modal-body">
+          <div class="form-grid"> 
+              <div class="field"><label>Data e hora previstas *</label><input required name="data" type="datetime-local" value="${localValue}"></div> 
+              <div class="field"><label>CD / Hub de origem *</label><input required name="origem" placeholder="Ex.: CD Guarulhos"></div> 
+              
+              <div class="field"><label>Motorista</label><input name="motorista" placeholder="Nome completo (Opcional)"></div> 
+              <div class="field"><label>Placa do veículo</label><input maxlength="8" name="placa" placeholder="ABC-1D23 (Opcional)" style="text-transform:uppercase"></div> 
+              <div class="field"><label>Volumetria</label><input min="0" name="volumetria" type="number" placeholder="Quantidade de volumes (Opcional)"></div> 
+              
+              <div class="field"><label>Doca *</label>
+                  <select required name="doca">
+                      <option value="">Selecione</option>
+                      ${Array.from({ length: 18 }, (_, i) => `<option value="${i + 1}" ${String(i + 1) === String(preselectedDock) ? "selected" : ""}>${pad(i + 1)}</option>`).join("")}
+                  </select>
+              </div> 
+              
+              <div class="field"><label>Conferente / Responsável</label>
+                  <input name="conferente" value="${esc(conferenteNome)}" readonly style="background:#f3f6fa;color:#8396a7;pointer-events:none;">
+              </div> 
+              
+              <div class="field full"><label>Status inicial</label>
+                  <select name="status">
+                      <option selected>Em descarga</option>
+                      <option>Aguardando</option>
+                      <option>Em Trânsito</option>
+                  </select>
+                  <p class="helper">O horário de início será registrado automaticamente.</p>
+              </div>
+          </div>
+      </div>
+      <div class="modal-actions">
+          <button type="button" class="secondary-btn" data-action="close-modal">Cancelar</button>
+          <button class="primary-btn" type="submit">Iniciar operação</button>
+      </div>
+  </form>
+  </div>`;
 }
 
 function openStartUnload(id) {
