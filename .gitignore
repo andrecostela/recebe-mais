@@ -1,0 +1,23 @@
+# Dependências do Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Banco de dados e armazenamento local temporário/contingência
+data/
+*.tmp
+*.json.tmp
+
+# Arquivos de ambiente e chaves secretas
+.env
+.env.local
+.env.production
+
+# Arquivos do sistema operacional
+.DS_Store
+Thumbs.db
+
+# Logs do servidor
+logs/
+*.log
