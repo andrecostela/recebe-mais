@@ -1,0 +1,17 @@
+{
+  "short_name": "Recebe+",
+  "name": "Recebe+ - Controle Logístico",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": ".",
+  "background_color": "#071a2d",
+  "theme_color": "#0086ff",
+  "display": "standalone",
+  "orientation": "portrait"
+}
