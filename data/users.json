@@ -1,0 +1,12 @@
+{
+  "users": [
+    {
+      "username": "admin",
+      "name": "Administrador do Sistema",
+      "role": "Supervisor",
+      "salt": "4ad5ceec038339dc0a57f536ec24bbe0",
+      "hash": "9be3d3523f592f047e1bf80d2e208597711a7135d81f2879297e33f887520ecae375acfab6e3bb31709c659675fa15b802ec48cbda2374559365ad382cf329bb",
+      "createdAt": "2026-10-13T18:39:43.007Z"
+    }
+  ]
+}

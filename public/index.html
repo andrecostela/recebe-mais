@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Recebe+ - Controle Logístico</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/svg+xml" href="icon.svg">
+  <meta name="theme-color" content="#071a2d">
+  <!-- SheetJS para exportação de relatórios Excel -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+
+  <!-- Carregamento Modularizado -->
+  <script src="src/state.js"></script>
+  <script src="src/api.js"></script>
+  <script src="src/utils/formatters.js"></script>
+  <script src="src/utils/csv-parser.js"></script>
+  <script src="src/utils/excel-exporter.js"></script>
+  <script src="src/components/toasts.js"></script>
+  <script src="src/components/navbar.js"></script>
+  <script src="src/components/modals.js"></script>
+  <script src="src/views/dashboard.js"></script>
+  <script src="src/views/controle.js"></script>
+  <script src="src/views/inbound.js"></script>
+  <script src="src/views/insumos.js"></script>
+  <script src="src/views/analises.js"></script>
+  <script src="src/views/configuracoes.js"></script>
+  <script src="src/app.js"></script>
+</body>
+</html>
