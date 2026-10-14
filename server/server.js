@@ -669,6 +669,7 @@ function validateRecord(input) {
   if (!["Em Trânsito", "Aguardando", "Em descarga"].includes(status)) throw new UserError("Status inválido");
   return record;
 }
+
 // ---------------------------------------------------------------------
 // 6. Rotas da API
 // ---------------------------------------------------------------------
@@ -881,7 +882,7 @@ async function handleApi(req, res, url) {
       }
       sql += " ORDER BY i.criado_em DESC LIMIT 2000";
 
-const result = await pool.query(sql, params);
+      const result = await pool.query(sql, params);
       return json(res, 200, { insumos: result.rows });
     } catch (error) {
       return sendError(res, error);
