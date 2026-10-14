@@ -527,4 +527,145 @@ async function writeAudit(action, { recordId = "", placa = "", role = "", actor 
 
 async function createRecordDb(record, session) {
   if (usePg) {
-    aw
+    await pool.query(
+      "INSERT INTO recebimentos (id, data, origem, placa, motorista, doca, volumetria, sla, status, inicio, fim, conferente) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+      [record.id, record.data, record.origem, record.placa, record.motorista, record.doca, record.volumetria, record.sla, record.status, record.inicio, record.fim, record.conferente]
+    );
+  } else {
+    const db = readJsonDb();
+    db.records.unshift(record);
+    writeDb(db);
+  }
+  await writeAudit("Recebimento criado", { recordId: record.id, placa: record.placa, role: session.role, actor: session.username });
+}
+
+// --- Transições de status (regras compartilhadas entre PG e JSON) ---
+const TRANSITIONS = { start: "Em descarga", finish: "Concluído", issue: "Em Atraso" };
+
+function normalizeInsumos(input) {
+  let list = input.insumos;
+  if (typeof list === "string") { try { list = JSON.parse(list); } catch { list = []; } }
+  if (!Array.isArray(list)) return [];
+  return list.slice(0, 50).map(item => ({
+    tipo: cleanText(item?.tipo, 50),
+    qtd: Math.floor(Number(item?.qtd ?? item?.quantidade ?? 0)),
+    status: cleanText(item?.status ?? item?.condicao, 30),
+    obs: cleanText(item?.obs ?? item?.observacao, 255),
+    foto_url: safeUrl(item?.foto_url || input.foto_url)
+  })).filter(i => i.tipo && Number.isFinite(i.qtd) && i.qtd > 0);
+}
+
+// Retorna as colunas a alterar. O conferente vem SEMPRE da sessão, nunca do corpo da requisição.
+function planTransition(record, action, input, session) {
+  if (!Object.hasOwn(TRANSITIONS, action)) throw new UserError("Transição inválida");
+  const changes = { status: TRANSITIONS[action] };
+  let items = [];
+
+  if (action === "start") {
+    if (!["Em Trânsito", "Aguardando"].includes(record.status)) throw new UserError("A descarga não pode ser iniciada neste status");
+    const volume = Number(input.volumetria);
+    if (!Number.isInteger(volume) || volume < 1) throw new UserError("Informe a volumetria (número inteiro) para iniciar a descarga");
+    changes.volumetria = volume;
+    changes.inicio = new Date().toISOString();
+    changes.conferente = cleanText(session.name || session.username, 100);
+  } else {
+    if (record.status !== "Em descarga") throw new UserError("A descarga não está em andamento");
+    changes.fim = new Date().toISOString();
+    const foto = safeUrl(input.foto_url);
+    if (foto) changes.foto_url = foto;
+    items = normalizeInsumos(input);
+    if (items.length) {
+      changes.insumo_tipo = items.map(i => `${i.qtd}x ${i.tipo}`).join(", ");
+      changes.insumo_qtd = items.reduce((sum, i) => sum + i.qtd, 0);
+      changes.insumo_status = [...new Set(items.map(i => i.status).filter(Boolean))].join(", ");
+      changes.insumo_obs = items.map(i => i.obs).filter(Boolean).join(" | ").slice(0, 1000);
+      changes.insumos_lista = items;
+    }
+  }
+  return { changes, items };
+}
+
+async function transitionRecordDb(id, action, input, session) {
+  let updated;
+
+  if (usePg) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const found = await client.query("SELECT * FROM recebimentos WHERE id = $1 FOR UPDATE", [id]);
+      if (!found.rows.length) throw new UserError("Registro não encontrado");
+      const { changes, items } = planTransition(found.rows[0], action, input, session);
+
+      const params = [];
+      const sets = Object.entries(changes).map(([column, value]) => {
+        params.push(column === "insumos_lista" ? JSON.stringify(value) : value);
+        return `${column} = $${params.length}`;
+      });
+      params.push(id);
+      const result = await client.query(`UPDATE recebimentos SET ${sets.join(", ")} WHERE id = $${params.length} RETURNING *`, params);
+
+      for (const item of items) {
+        await client.query(
+          "INSERT INTO insumos_recebimento (id, recebimento_id, tipo_insumo, quantidade, condicao, observacao, foto_url) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+          [crypto.randomUUID(), id, item.tipo, item.qtd, item.status, item.obs, item.foto_url]
+        );
+      }
+      await client.query("COMMIT");
+      updated = mapRecord(result.rows[0]);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  } else {
+    const db = readJsonDb();
+    const record = db.records.find(r => r.id === id);
+    if (!record) throw new UserError("Registro não encontrado");
+    const { changes } = planTransition(record, action, input, session);
+    const { insumos_lista, ...rest } = changes;
+    Object.assign(record, rest);
+    if (insumos_lista) record.insumos = insumos_lista;
+    writeDb(db);
+    updated = record;
+  }
+
+  await writeAudit(`Status alterado para ${updated.status}`, { recordId: updated.id, placa: updated.placa, role: session.role, actor: session.username });
+  return updated;
+}
+
+// ---------------------------------------------------------------------
+// 5. Validação de registros
+// ---------------------------------------------------------------------
+function validateRecord(input) {
+  const status = cleanText(input.status, 30) || "Em Trânsito";
+  const data = toIso(cleanText(input.data, 40));
+  let inicio = input.inicio ? toIso(cleanText(input.inicio, 40)) : null;
+  if (input.inicio && !inicio) throw new UserError("Início inválido");
+  if (status === "Em descarga" && !inicio) inicio = new Date().toISOString();
+
+  const record = {
+    id: `R-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
+    data,
+    origem: cleanText(input.origem),
+    doca: cleanText(input.doca, 12).replace(/\D/g, "").slice(0, 10) || "—",
+    motorista: cleanText(input.motorista) || "—",             // opcional
+    placa: cleanText(input.placa, 10).toUpperCase() || "—",   // opcional
+    volumetria: Number(input.volumetria ?? 0),
+    inicio,
+    fim: null,
+    sla: Number(input.sla) || 60,
+    conferente: cleanText(input.conferente, 100) || "—",
+    status,
+    source: "server"
+  };
+
+  if (!record.data) throw new UserError("Data inválida");
+  if (!record.origem) throw new UserError("A origem é obrigatória");
+  if (record.placa !== "—" && !/^[A-Z0-9-]{7,8}$/.test(record.placa)) throw new UserError("Placa inválida");
+  if (!Number.isInteger(record.volumetria) || record.volumetria < 0) throw new UserError("Volumetria inválida (use número inteiro)");
+  if (status === "Em descarga" && record.volumetria < 1) throw new UserError("Informe a volumetria para iniciar a descarga");
+  if (!Number.isInteger(record.sla) || record.sla < 1 || record.sla > 1440) throw new UserError("SLA inválido (1 a 1440 minutos)");
+  if (!["Em Trânsito", "Aguardando", "Em descarga"].includes(status)) throw new UserError("Status inválido");
+  return record;
+}
