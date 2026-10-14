@@ -177,13 +177,11 @@ async function openManageUsers() {
 
 function openUserForm(username = "", name = "", role = "Conferente", registro = "") {
     const isEdit = !!username;
-
-    // Separa o nome atual em Nome e Sobrenome caso seja uma edição
     const nameParts = name.split(" ");
     const firstName = nameParts[0] || "";
     const lastName = nameParts.slice(1).join(" ") || "";
 
-    $("#modal-root").innerHTML = `<div class="overlay" data-action="close-modal">
+    document.querySelector("#modal-root").innerHTML = `<div class="overlay" data-action="close-modal">
     <form class="modal small" id="register-user-form" data-action-type="${isEdit ? 'update' : 'create'}" onclick="event.stopPropagation()">
         <div class="modal-head">
             <div>
