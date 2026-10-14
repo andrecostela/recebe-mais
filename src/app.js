@@ -169,7 +169,7 @@ document.addEventListener("click", async event => {
   if (!button) return;
   const action = button.dataset.action;
 
-  // Fechar Modal (Sem restrições)
+  // Fechar Modal sem travamentos de classe
   if (action === "close-modal") {
     const modalRoot = $("#modal-root");
     if (modalRoot) modalRoot.innerHTML = "";
@@ -406,7 +406,7 @@ document.addEventListener("submit", async event => {
       submit.textContent = "Salvando...";
     }
 
-    // Unifica o Nome e Sobrenome para persistência no backend
+    // Unifica Nome e Sobrenome para salvar na API
     const nomeCompleto = `${String(form.get("new_nome") || "").trim()} ${String(form.get("new_sobrenome") || "").trim()}`.trim();
 
     try {
