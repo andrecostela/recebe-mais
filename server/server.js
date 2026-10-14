@@ -669,3 +669,214 @@ function validateRecord(input) {
   if (!["Em Trânsito", "Aguardando", "Em descarga"].includes(status)) throw new UserError("Status inválido");
   return record;
 }
+// ---------------------------------------------------------------------
+// 6. Rotas da API
+// ---------------------------------------------------------------------
+async function handleApi(req, res, url) {
+  if (req.method === "GET" && url.pathname === "/api/health") return json(res, 200, { ok: true });
+
+  // ----- Login -----
+  if (req.method === "POST" && url.pathname === "/api/login") {
+    const ip = clientIp(req);
+    if (isRateLimited(ip)) return json(res, 429, { error: "Muitas tentativas. Aguarde antes de tentar novamente." });
+    try {
+      const input = await readBody(req);
+      const username = cleanText(input.username, 60);
+      const user = (await readUsers()).find(item => item.username.toLowerCase() === username.toLowerCase());
+      // Executa scrypt mesmo sem usuário, para não revelar por tempo de resposta quais logins existem
+      const ok = user ? await verifyPassword(input.password, user) : (await scrypt("x", DUMMY_SALT, 64), false);
+      if (!ok) {
+        registerFailure(ip);
+        return json(res, 401, { error: "Usuário ou senha inválidos" });
+      }
+      loginAttempts.delete(ip);
+      const token = crypto.randomBytes(32).toString("hex");
+      const csrf = crypto.randomBytes(24).toString("hex");
+      const name = user.name || user.username;
+      sessions.set(token, { username: user.username, name, role: user.role, csrf, expiresAt: Date.now() + SESSION_TTL });
+      setSessionCookie(res, token);
+      return json(res, 200, { user: { username: user.username, name, role: user.role }, csrf });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/me") {
+    const session = requireSession(req, res);
+    if (!session) return;
+    return json(res, 200, { user: { username: session.username, name: session.name, role: session.role }, csrf: session.csrf });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/logout") {
+    const session = requireSession(req, res, { write: true });
+    if (!session) return;
+    sessions.delete(session.token);
+    setSessionCookie(res, "", 0);
+    return json(res, 200, { ok: true });
+  }
+
+  // ----- Trocar a própria senha -----
+  if (req.method === "POST" && url.pathname === "/api/change-password") {
+    const session = requireSession(req, res, { write: true });
+    if (!session) return;
+    try {
+      const { currentPassword, newPassword } = await readBody(req);
+      if (!currentPassword || !newPassword) return json(res, 400, { error: "Preencha a senha atual e a nova senha." });
+
+      const user = (await readUsers()).find(u => u.username.toLowerCase() === session.username.toLowerCase());
+      if (!user) return json(res, 404, { error: "Usuário não encontrado." });
+      if (!(await verifyPassword(currentPassword, user))) return json(res, 401, { error: "A senha atual informada está incorreta." });
+
+      validatePasswordStrength(newPassword);
+      if (safeEqual(currentPassword, newPassword)) throw new UserError("A nova senha deve ser diferente da atual.");
+
+      const cred = await hashPassword(newPassword);
+      await saveUser({ username: user.username, name: user.name || user.username, role: user.role, ...cred }); // PG ou arquivo
+      invalidateUserSessions(user.username, session.token);
+      await writeAudit("[SEGURANÇA] Senha própria alterada", { recordId: user.username, role: session.role, actor: session.username });
+      return json(res, 200, { ok: true, message: "Senha alterada com sucesso." });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  // ----- Rotas autenticadas -----
+  const session = requireSession(req, res, { write: req.method !== "GET" });
+  if (!session) return;
+  const role = session.role;
+
+  if (req.method === "GET" && url.pathname === "/api/users") {
+    if (role !== "Supervisor") return json(res, 403, { error: "Acesso negado." });
+    try {
+      const users = (await readUsers()).map(u => ({ username: u.username, name: u.name || "", role: u.role }));
+      return json(res, 200, { users });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/users") {
+    if (role !== "Supervisor") return json(res, 403, { error: "Apenas supervisores podem gerenciar a equipe." });
+    try {
+      const input = await readBody(req);
+      const action = input.action === "edit" ? "update" : input.action;
+      if (!["create", "update"].includes(action)) throw new UserError("Ação inválida.");
+
+      const username = cleanText(input.username, 60);
+      const name = cleanText(input.name, 100);
+      const newRole = cleanText(input.role, 20);
+      const password = String(input.password || "").trim();
+      if (!username || !name || !ROLES.includes(newRole)) throw new UserError("Preencha todos os campos corretamente.");
+
+      const usersDb = await readUsers();
+      const existing = usersDb.find(u => u.username.toLowerCase() === username.toLowerCase());
+
+      if (action === "create") {
+        if (existing) throw new UserError("Este nome de usuário (login) já existe.");
+        if (!USERNAME_RE.test(username)) throw new UserError("Login inválido: use 3 a 60 letras, números, ponto, hífen ou sublinhado.");
+        validatePasswordStrength(password);
+        await saveUser({ username, name, role: newRole, ...(await hashPassword(password)) });
+        await writeAudit("[SEGURANÇA] Usuário criado", { recordId: username, placa: newRole, role, actor: session.username });
+      } else {
+        if (!existing) return json(res, 404, { error: "Usuário não encontrado." });
+        if (existing.role === "Supervisor" && newRole !== "Supervisor" && usersDb.filter(u => u.role === "Supervisor").length <= 1) {
+          throw new UserError("Não é possível rebaixar o único Supervisor existente.");
+        }
+        let { salt, hash } = existing;
+        const passwordChanged = password.length > 0;
+        if (passwordChanged) {
+          validatePasswordStrength(password);
+          ({ salt, hash } = await hashPassword(password));
+        }
+        await saveUser({ username: existing.username, name, role: newRole, salt, hash });
+        if (passwordChanged || existing.role !== newRole) {
+          const isSelf = existing.username.toLowerCase() === session.username.toLowerCase();
+          invalidateUserSessions(existing.username, isSelf ? session.token : null, newRole);
+        }
+        await writeAudit(`[SEGURANÇA] Usuário editado${passwordChanged ? " (senha redefinida)" : ""}`, { recordId: existing.username, placa: newRole, role, actor: session.username });
+      }
+      return json(res, 200, { ok: true, username, name, role: newRole });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/records") {
+    try {
+      const db = await readDb({ withAudit: false });
+      return json(res, 200, { records: db.records, updatedAt: new Date().toISOString() });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/audit") {
+    if (role !== "Supervisor") return json(res, 403, { error: "Acesso restrito ao supervisor" });
+    try {
+      const db = await readDb();
+      return json(res, 200, { audit: db.audit.slice(0, 100) });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/records") {
+    if (!ROLES.includes(role)) return json(res, 403, { error: "Perfil sem permissão" });
+    try {
+      const record = validateRecord(await readBody(req));
+      await createRecordDb(record, session);
+      return json(res, 201, { record });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  const match = url.pathname.match(/^\/api\/records\/([^/]+)\/transition$/);
+  if (req.method === "PATCH" && match) {
+    if (!["Conferente", "Supervisor"].includes(role)) return json(res, 403, { error: "Somente conferentes e supervisores podem alterar a descarga" });
+    try {
+      const input = await readBody(req);
+      const record = await transitionRecordDb(safeDecode(match[1]), input.action, input, session);
+      return json(res, 200, { record });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/insumos") {
+    if (!usePg) return json(res, 200, { insumos: [] });
+    try {
+      const dataInicio = url.searchParams.get("data_inicio");
+      const dataFim = url.searchParams.get("data_fim");
+      const origem = url.searchParams.get("origem");
+      const conferente = url.searchParams.get("conferente");
+      const escapeLike = s => s.toLowerCase().trim().replace(/[\\%_]/g, "\\$&");
+      const dia = "(i.criado_em AT TIME ZONE 'America/Sao_Paulo')::date"; // filtro inclusivo no dia local
+
+      let sql = `
+        SELECT i.id, i.tipo_insumo, i.quantidade, i.condicao, i.observacao, i.foto_url, i.criado_em,
+               r.origem, r.placa, r.conferente
+        FROM insumos_recebimento i
+        JOIN recebimentos r ON r.id = i.recebimento_id
+        WHERE 1=1`;
+      const params = [];
+
+      if (dataInicio) {
+        if (!DATE_RE.test(dataInicio)) throw new UserError("Data inicial inválida");
+        params.push(dataInicio);
+        sql += ` AND ${dia} >= $${params.length}::date`;
+      }
+      if (dataFim) {
+        if (!DATE_RE.test(dataFim)) throw new UserError("Data final inválida");
+        params.push(dataFim);
+        sql += ` AND ${dia} <= $${params.length}::date`;
+      }
+      if (origem) {
+        params.push(`%${escapeLike(origem)}%`);
+        sql += ` AND LOWER(r.origem) LIKE $${params.length} ESCAPE '\\'`;
+      }
+      if (conferente) {
+        params.push(`%${escapeLike(conferente)}%`);
+        sql += ` AND LOWER(r.conferente) LIKE $${params.length} ESCAPE '\\'`;
+      }
+      sql += " ORDER BY i.criado_em DESC LIMIT 2000";
