@@ -479,7 +479,6 @@ function mapRecord(r) {
     source: "server" // sem isso o front trata o registro como local e deixa de chamar a API
   };
 }
-
 // Erros do banco propagam (HTTP 500) — nunca viram "lista vazia"
 async function readDb({ withAudit = true } = {}) {
   if (usePg) {
@@ -527,4 +526,398 @@ async function writeAudit(action, { recordId = "", placa = "", role = "", actor 
 
 async function createRecordDb(record, session) {
   if (usePg) {
-    aw
+    await pool.query(
+      "INSERT INTO recebimentos (id, data, origem, placa, motorista, doca, volumetria, sla, status, inicio, fim, conferente) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+      [record.id, record.data, record.origem, record.placa, record.motorista, record.doca, record.volumetria, record.sla, record.status, record.inicio, record.fim, record.conferente]
+    );
+  } else {
+    const db = readJsonDb();
+    db.records.unshift(record);
+    writeDb(db);
+  }
+  await writeAudit("Recebimento criado", { recordId: record.id, placa: record.placa, role: session.role, actor: session.username });
+}
+
+// --- Transições de status (regras compartilhadas entre PG e JSON) ---
+const TRANSITIONS = { start: "Em descarga", finish: "Concluído", issue: "Em Atraso" };
+
+function normalizeInsumos(input) {
+  let list = input.insumos;
+  if (typeof list === "string") { try { list = JSON.parse(list); } catch { list = []; } }
+  if (!Array.isArray(list)) return [];
+  return list.slice(0, 50).map(item => ({
+    tipo: cleanText(item?.tipo, 50),
+    qtd: Math.floor(Number(item?.qtd ?? item?.quantidade ?? 0)),
+    status: cleanText(item?.status ?? item?.condicao, 30),
+    obs: cleanText(item?.obs ?? item?.observacao, 255),
+    foto_url: safeUrl(item?.foto_url || input.foto_url)
+  })).filter(i => i.tipo && Number.isFinite(i.qtd) && i.qtd > 0);
+}
+
+// Retorna as colunas a alterar. O conferente vem SEMPRE da sessão, nunca do corpo da requisição.
+function planTransition(record, action, input, session) {
+  if (!Object.hasOwn(TRANSITIONS, action)) throw new UserError("Transição inválida");
+  const changes = { status: TRANSITIONS[action] };
+  let items = [];
+
+  if (action === "start") {
+    if (!["Em Trânsito", "Aguardando"].includes(record.status)) throw new UserError("A descarga não pode ser iniciada neste status");
+    const volume = Number(input.volumetria);
+    if (!Number.isInteger(volume) || volume < 1) throw new UserError("Informe a volumetria (número inteiro) para iniciar a descarga");
+    changes.volumetria = volume;
+    changes.inicio = new Date().toISOString();
+    changes.conferente = cleanText(session.name || session.username, 100);
+  } else {
+    if (record.status !== "Em descarga") throw new UserError("A descarga não está em andamento");
+    changes.fim = new Date().toISOString();
+    const foto = safeUrl(input.foto_url);
+    if (foto) changes.foto_url = foto;
+    items = normalizeInsumos(input);
+    if (items.length) {
+      changes.insumo_tipo = items.map(i => `${i.qtd}x ${i.tipo}`).join(", ");
+      changes.insumo_qtd = items.reduce((sum, i) => sum + i.qtd, 0);
+      changes.insumo_status = [...new Set(items.map(i => i.status).filter(Boolean))].join(", ");
+      changes.insumo_obs = items.map(i => i.obs).filter(Boolean).join(" | ").slice(0, 1000);
+      changes.insumos_lista = items;
+    }
+  }
+  return { changes, items };
+}
+
+async function transitionRecordDb(id, action, input, session) {
+  let updated;
+
+  if (usePg) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const found = await client.query("SELECT * FROM recebimentos WHERE id = $1 FOR UPDATE", [id]);
+      if (!found.rows.length) throw new UserError("Registro não encontrado");
+      const { changes, items } = planTransition(found.rows[0], action, input, session);
+
+      const params = [];
+      const sets = Object.entries(changes).map(([column, value]) => {
+        params.push(column === "insumos_lista" ? JSON.stringify(value) : value);
+        return `${column} = $${params.length}`;
+      });
+      params.push(id);
+      const result = await client.query(`UPDATE recebimentos SET ${sets.join(", ")} WHERE id = $${params.length} RETURNING *`, params);
+
+      for (const item of items) {
+        await client.query(
+          "INSERT INTO insumos_recebimento (id, recebimento_id, tipo_insumo, quantidade, condicao, observacao, foto_url) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+          [crypto.randomUUID(), id, item.tipo, item.qtd, item.status, item.obs, item.foto_url]
+        );
+      }
+      await client.query("COMMIT");
+      updated = mapRecord(result.rows[0]);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  } else {
+    const db = readJsonDb();
+    const record = db.records.find(r => r.id === id);
+    if (!record) throw new UserError("Registro não encontrado");
+    const { changes } = planTransition(record, action, input, session);
+    const { insumos_lista, ...rest } = changes;
+    Object.assign(record, rest);
+    if (insumos_lista) record.insumos = insumos_lista;
+    writeDb(db);
+    updated = record;
+  }
+
+  await writeAudit(`Status alterado para ${updated.status}`, { recordId: updated.id, placa: updated.placa, role: session.role, actor: session.username });
+  return updated;
+}
+
+// ---------------------------------------------------------------------
+// 5. Validação de registros
+// ---------------------------------------------------------------------
+function validateRecord(input) {
+  const status = cleanText(input.status, 30) || "Em Trânsito";
+  const data = toIso(cleanText(input.data, 40));
+  let inicio = input.inicio ? toIso(cleanText(input.inicio, 40)) : null;
+  if (input.inicio && !inicio) throw new UserError("Início inválido");
+  if (status === "Em descarga" && !inicio) inicio = new Date().toISOString();
+
+  const record = {
+    id: `R-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
+    data,
+    origem: cleanText(input.origem),
+    doca: cleanText(input.doca, 12).replace(/\D/g, "").slice(0, 10) || "—",
+    motorista: cleanText(input.motorista) || "—",             // opcional
+    placa: cleanText(input.placa, 10).toUpperCase() || "—",   // opcional
+    volumetria: Number(input.volumetria ?? 0),
+    inicio,
+    fim: null,
+    sla: Number(input.sla) || 60,
+    conferente: cleanText(input.conferente, 100) || "—",
+    status,
+    source: "server"
+  };
+
+  if (!record.data) throw new UserError("Data inválida");
+  if (!record.origem) throw new UserError("A origem é obrigatória");
+  if (record.placa !== "—" && !/^[A-Z0-9-]{7,8}$/.test(record.placa)) throw new UserError("Placa inválida");
+  if (!Number.isInteger(record.volumetria) || record.volumetria < 0) throw new UserError("Volumetria inválida (use número inteiro)");
+  if (status === "Em descarga" && record.volumetria < 1) throw new UserError("Informe a volumetria para iniciar a descarga");
+  if (!Number.isInteger(record.sla) || record.sla < 1 || record.sla > 1440) throw new UserError("SLA inválido (1 a 1440 minutos)");
+  if (!["Em Trânsito", "Aguardando", "Em descarga"].includes(status)) throw new UserError("Status inválido");
+  return record;
+}
+
+// ---------------------------------------------------------------------
+// 6. Rotas da API
+// ---------------------------------------------------------------------
+async function handleApi(req, res, url) {
+  if (req.method === "GET" && url.pathname === "/api/health") return json(res, 200, { ok: true });
+
+  // ----- Login -----
+  if (req.method === "POST" && url.pathname === "/api/login") {
+    const ip = clientIp(req);
+    if (isRateLimited(ip)) return json(res, 429, { error: "Muitas tentativas. Aguarde antes de tentar novamente." });
+    try {
+      const input = await readBody(req);
+      const username = cleanText(input.username, 60);
+      const user = (await readUsers()).find(item => item.username.toLowerCase() === username.toLowerCase());
+      // Executa scrypt mesmo sem usuário, para não revelar por tempo de resposta quais logins existem
+      const ok = user ? await verifyPassword(input.password, user) : (await scrypt("x", DUMMY_SALT, 64), false);
+      if (!ok) {
+        registerFailure(ip);
+        return json(res, 401, { error: "Usuário ou senha inválidos" });
+      }
+      loginAttempts.delete(ip);
+      const token = crypto.randomBytes(32).toString("hex");
+      const csrf = crypto.randomBytes(24).toString("hex");
+      const name = user.name || user.username;
+      sessions.set(token, { username: user.username, name, role: user.role, csrf, expiresAt: Date.now() + SESSION_TTL });
+      setSessionCookie(res, token);
+      return json(res, 200, { user: { username: user.username, name, role: user.role }, csrf });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/me") {
+    const session = requireSession(req, res);
+    if (!session) return;
+    return json(res, 200, { user: { username: session.username, name: session.name, role: session.role }, csrf: session.csrf });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/logout") {
+    const session = requireSession(req, res, { write: true });
+    if (!session) return;
+    sessions.delete(session.token);
+    setSessionCookie(res, "", 0);
+    return json(res, 200, { ok: true });
+  }
+
+  // ----- Trocar a própria senha -----
+  if (req.method === "POST" && url.pathname === "/api/change-password") {
+    const session = requireSession(req, res, { write: true });
+    if (!session) return;
+    try {
+      const { currentPassword, newPassword } = await readBody(req);
+      if (!currentPassword || !newPassword) return json(res, 400, { error: "Preencha a senha atual e a nova senha." });
+
+      const user = (await readUsers()).find(u => u.username.toLowerCase() === session.username.toLowerCase());
+      if (!user) return json(res, 404, { error: "Usuário não encontrado." });
+      if (!(await verifyPassword(currentPassword, user))) return json(res, 401, { error: "A senha atual informada está incorreta." });
+
+      validatePasswordStrength(newPassword);
+      if (safeEqual(currentPassword, newPassword)) throw new UserError("A nova senha deve ser diferente da atual.");
+
+      const cred = await hashPassword(newPassword);
+      await saveUser({ username: user.username, name: user.name || user.username, role: user.role, ...cred }); // PG ou arquivo
+      invalidateUserSessions(user.username, session.token);
+      await writeAudit("[SEGURANÇA] Senha própria alterada", { recordId: user.username, role: session.role, actor: session.username });
+      return json(res, 200, { ok: true, message: "Senha alterada com sucesso." });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  // ----- Rotas autenticadas -----
+  const session = requireSession(req, res, { write: req.method !== "GET" });
+  if (!session) return;
+  const role = session.role;
+
+  if (req.method === "GET" && url.pathname === "/api/users") {
+    if (role !== "Supervisor") return json(res, 403, { error: "Acesso negado." });
+    try {
+      const users = (await readUsers()).map(u => ({ username: u.username, name: u.name || "", role: u.role }));
+      return json(res, 200, { users });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/users") {
+    if (role !== "Supervisor") return json(res, 403, { error: "Apenas supervisores podem gerenciar a equipe." });
+    try {
+      const input = await readBody(req);
+      const action = input.action === "edit" ? "update" : input.action;
+      if (!["create", "update"].includes(action)) throw new UserError("Ação inválida.");
+
+      const username = cleanText(input.username, 60);
+      const name = cleanText(input.name, 100);
+      const newRole = cleanText(input.role, 20);
+      const password = String(input.password || "").trim();
+      if (!username || !name || !ROLES.includes(newRole)) throw new UserError("Preencha todos os campos corretamente.");
+
+      const usersDb = await readUsers();
+      const existing = usersDb.find(u => u.username.toLowerCase() === username.toLowerCase());
+
+      if (action === "create") {
+        if (existing) throw new UserError("Este nome de usuário (login) já existe.");
+        if (!USERNAME_RE.test(username)) throw new UserError("Login inválido: use 3 a 60 letras, números, ponto, hífen ou sublinhado.");
+        validatePasswordStrength(password);
+        await saveUser({ username, name, role: newRole, ...(await hashPassword(password)) });
+        await writeAudit("[SEGURANÇA] Usuário criado", { recordId: username, placa: newRole, role, actor: session.username });
+      } else {
+        if (!existing) return json(res, 404, { error: "Usuário não encontrado." });
+        if (existing.role === "Supervisor" && newRole !== "Supervisor" && usersDb.filter(u => u.role === "Supervisor").length <= 1) {
+          throw new UserError("Não é possível rebaixar o único Supervisor existente.");
+        }
+        let { salt, hash } = existing;
+        const passwordChanged = password.length > 0;
+        if (passwordChanged) {
+          validatePasswordStrength(password);
+          ({ salt, hash } = await hashPassword(password));
+        }
+        await saveUser({ username: existing.username, name, role: newRole, salt, hash });
+        if (passwordChanged || existing.role !== newRole) {
+          const isSelf = existing.username.toLowerCase() === session.username.toLowerCase();
+          invalidateUserSessions(existing.username, isSelf ? session.token : null, newRole);
+        }
+        await writeAudit(`[SEGURANÇA] Usuário editado${passwordChanged ? " (senha redefinida)" : ""}`, { recordId: existing.username, placa: newRole, role, actor: session.username });
+      }
+      return json(res, 200, { ok: true, username, name, role: newRole });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/records") {
+    try {
+      const db = await readDb({ withAudit: false });
+      return json(res, 200, { records: db.records, updatedAt: new Date().toISOString() });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/audit") {
+    if (role !== "Supervisor") return json(res, 403, { error: "Acesso restrito ao supervisor" });
+    try {
+      const db = await readDb();
+      return json(res, 200, { audit: db.audit.slice(0, 100) });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/records") {
+    if (!ROLES.includes(role)) return json(res, 403, { error: "Perfil sem permissão" });
+    try {
+      const record = validateRecord(await readBody(req));
+      await createRecordDb(record, session);
+      return json(res, 201, { record });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  const match = url.pathname.match(/^\/api\/records\/([^/]+)\/transition$/);
+  if (req.method === "PATCH" && match) {
+    if (!["Conferente", "Supervisor"].includes(role)) return json(res, 403, { error: "Somente conferentes e supervisores podem alterar a descarga" });
+    try {
+      const input = await readBody(req);
+      const record = await transitionRecordDb(safeDecode(match[1]), input.action, input, session);
+      return json(res, 200, { record });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/insumos") {
+    if (!usePg) return json(res, 200, { insumos: [] });
+    try {
+      const dataInicio = url.searchParams.get("data_inicio");
+      const dataFim = url.searchParams.get("data_fim");
+      const origem = url.searchParams.get("origem");
+      const conferente = url.searchParams.get("conferente");
+      const escapeLike = s => s.toLowerCase().trim().replace(/[\\%_]/g, "\\$&");
+      const dia = "(i.criado_em AT TIME ZONE 'America/Sao_Paulo')::date"; // filtro inclusivo no dia local
+
+      let sql = `
+        SELECT i.id, i.tipo_insumo, i.quantidade, i.condicao, i.observacao, i.foto_url, i.criado_em,
+               r.origem, r.placa, r.conferente
+        FROM insumos_recebimento i
+        JOIN recebimentos r ON r.id = i.recebimento_id
+        WHERE 1=1`;
+      const params = [];
+
+      if (dataInicio) {
+        if (!DATE_RE.test(dataInicio)) throw new UserError("Data inicial inválida");
+        params.push(dataInicio);
+        sql += ` AND ${dia} >= $${params.length}::date`;
+      }
+      if (dataFim) {
+        if (!DATE_RE.test(dataFim)) throw new UserError("Data final inválida");
+        params.push(dataFim);
+        sql += ` AND ${dia} <= $${params.length}::date`;
+      }
+      if (origem) {
+        params.push(`%${escapeLike(origem)}%`);
+        sql += ` AND LOWER(r.origem) LIKE $${params.length} ESCAPE '\\'`;
+      }
+      if (conferente) {
+        params.push(`%${escapeLike(conferente)}%`);
+        sql += ` AND LOWER(r.conferente) LIKE $${params.length} ESCAPE '\\'`;
+      }
+      sql += " ORDER BY i.criado_em DESC LIMIT 2000";
+
+      const result = await pool.query(sql, params);
+      return json(res, 200, { insumos: result.rows });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  return json(res, 404, { error: "Rota da API não encontrada" });
+}
+
+// ---------------------------------------------------------------------
+// 7. Arquivos estáticos (protegido contra path traversal)
+// ---------------------------------------------------------------------
+function serveStatic(req, res, url) {
+  if (req.method !== "GET" && req.method !== "HEAD") return json(res, 405, { error: "Método não permitido" });
+
+  let pathname;
+  try { pathname = decodeURIComponent(url.pathname); } catch { return json(res, 400, { error: "URL inválida" }); }
+  if (pathname.includes("\0")) return json(res, 400, { error: "URL inválida" });
+
+  let rel = pathname.replace(/^\/+/, "") || "index.html";
+  let baseDir = PUBLIC_DIR;
+  if (rel.startsWith("src/")) { baseDir = SRC_DIR; rel = rel.slice(4); }
+  else if (rel.startsWith("public/")) rel = rel.slice(7);
+
+  // O caminho FINAL (já resolvido) precisa estar dentro do diretório permitido
+  const filePath = path.resolve(baseDir, rel);
+  const ext = path.extname(filePath).toLowerCase();
+  if (!filePath.startsWith(baseDir + path.sep) || !MIME[ext] || path.basename(filePath).startsWith(".")) {
+    return json(res, 404, { error: "Arquivo não encontrado" });
+  }
+
+  fs.stat(filePath, (error, stat) => {
+    if (error || !stat.isFile()) return json(res, 404, { error: "Arquivo não encontrado" });
+    const headers = {
+      "Content-Type": MIME[ext],
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "same-origin",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+      "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; style-src 'self
