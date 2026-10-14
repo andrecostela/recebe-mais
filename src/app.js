@@ -113,11 +113,9 @@ document.addEventListener("click", async event => {
   if (!button) return;
   const action = button.dataset.action;
   if (action === "new-record" && can("create")) openNewRecord(button.dataset.dock || "");
-  if (action === "close-modal") {
-    if (event.target.classList.contains('overlay') || event.target.closest('.close-btn') || event.target.classList.contains('secondary-btn')) {
-      document.querySelector("#modal-root").innerHTML = "";
+    if (action === "close-modal") {
+        $("#modal-root").innerHTML = "";
     }
-  }
   if (action === "manage-users" && state.role === "Supervisor") openManageUsers();
   if (action === "new-user") openUserForm();
   if (action === "edit-user") openUserForm(button.dataset.username, button.dataset.name, button.dataset.role);
@@ -288,43 +286,55 @@ document.addEventListener("submit", async event => {
     syncSheet(true);
     scheduleSync();
   }
-  if (event.target.id === "register-user-form") {
-    event.preventDefault();
-    const form = new FormData(event.target);
-    const submit = event.target.querySelector("button[type=submit]");
-    const actionType = event.target.dataset.actionType;
+    if (event.target.id === "register-user-form") {
+        event.preventDefault();
+        const form = new FormData(event.target);
+        const submit = event.target.querySelector("button[type=submit]");
+        const actionType = event.target.dataset.actionType;
 
-    submit.disabled = true;
-    submit.textContent = "Salvando...";
+        const pass = String(form.get("new_password") || "").trim();
+        const confirm = String(form.get("confirm_password") || "").trim();
 
-    const newPassword = String(form.get("new_password") || "").trim();
-
-    api("/api/users", {
-      method: "POST",
-      body: JSON.stringify({
-        action: actionType,
-        name: String(form.get("new_name") || "").trim(),
-        username: String(form.get("new_username") || "").trim(),
-        password: newPassword,
-        role: form.get("new_role")
-      })
-    })
-      .then(payload => {
-        const msg = newPassword.length > 0 ? "Perfil e senha atualizados com sucesso." : "Perfil atualizado com sucesso.";
-        toast("Sucesso!", msg);
-        openManageUsers();
-      })
-      .catch(error => {
-        if (error.message && error.message.includes("Unexpected end of JSON")) {
-          toast("Sucesso!", "Alteração realizada com sucesso.");
-          openManageUsers();
-          return;
+        // Validação para ver se as duas senhas digitadas batem
+        if (pass || confirm) {
+            if (pass !== confirm) {
+                toast("Erro", "As senhas digitadas não coincidem.");
+                return;
+            }
         }
-        submit.disabled = false;
-        submit.textContent = actionType === 'create' ? "Cadastrar Usuário" : "Salvar Alterações";
-        toast("Falha ao salvar", error.message);
-      });
-  }
+
+        submit.disabled = true;
+        submit.textContent = "Salvando...";
+
+        // Junta o Nome e Sobrenome para enviar ao banco de dados
+        const nomeCompleto = `${String(form.get("new_nome") || "").trim()} ${String(form.get("new_sobrenome") || "").trim()}`;
+
+        api("/api/users", {
+            method: "POST",
+            body: JSON.stringify({
+                action: actionType,
+                name: nomeCompleto,
+                username: String(form.get("new_username") || "").trim(),
+                password: pass,
+                role: form.get("new_role")
+            })
+        })
+            .then(payload => {
+                const msg = pass.length > 0 ? "Perfil e senha atualizados." : "Perfil atualizado com sucesso.";
+                toast("Sucesso!", msg);
+                openManageUsers(); // Volta sozinho para a tela com a lista
+            })
+            .catch(error => {
+                if (error.message && error.message.includes("Unexpected end of JSON")) {
+                    toast("Sucesso!", "Alteração realizada com sucesso.");
+                    openManageUsers();
+                    return;
+                }
+                submit.disabled = false;
+                submit.textContent = actionType === 'create' ? "Cadastrar Usuário" : "Salvar Alterações";
+                toast("Falha ao salvar", error.message);
+            });
+    }
 
   if (event.target.id === "change-password-form") {
     event.preventDefault();

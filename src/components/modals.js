@@ -175,35 +175,50 @@ async function openManageUsers() {
   }
 }
 
-function openUserForm(username = "", name = "", role = "Conferente") {
-  const isEdit = !!username;
-  document.querySelector("#modal-root").innerHTML = `<div class="overlay" data-action="close-modal">
+function openUserForm(username = "", name = "", role = "Conferente", registro = "") {
+    const isEdit = !!username;
+
+    // Separa o nome atual em Nome e Sobrenome caso seja uma edição
+    const nameParts = name.split(" ");
+    const firstName = nameParts[0] || "";
+    const lastName = nameParts.slice(1).join(" ") || "";
+
+    $("#modal-root").innerHTML = `<div class="overlay" data-action="close-modal">
     <form class="modal small" id="register-user-form" data-action-type="${isEdit ? 'update' : 'create'}" onclick="event.stopPropagation()">
-      <div class="modal-head">
-        <div>
-          <h2>${isEdit ? 'Editar Usuário' : 'Novo Usuário'}</h2>
-          <p>${isEdit ? 'Altere as informações do membro da equipe.' : 'Preencha os dados do novo membro.'}</p>
+        <div class="modal-head">
+            <div>
+                <h2>${isEdit ? 'Editar Usuário' : 'Novo Usuário'}</h2>
+                <p>${isEdit ? 'Altere as informações do membro da equipe.' : 'Preencha os dados do novo membro.'}</p>
+            </div>
+            <button type="button" class="close-btn" data-action="close-modal">×</button>
         </div>
-        <button type="button" class="close-btn" data-action="close-modal">×</button>
-      </div>
-      <div class="modal-body">
-        <div class="field"><label>Nome Completo *</label><input required name="new_name" type="text" placeholder="Ex: André Costa" value="${esc(name)}"></div>
-        <div class="field"><label>Nome de Usuário (Login) *</label><input required name="new_username" type="text" placeholder="Ex: andre.costa" value="${esc(username)}" ${isEdit ? 'readonly style="background:#f3f6fa;color:#8396a7;cursor:not-allowed;"' : ''}></div>
-        <div class="field"><label>${isEdit ? 'Nova Senha (deixe em branco para manter)' : 'Senha Inicial *'}</label><input ${isEdit ? '' : 'required'} name="new_password" type="password" placeholder="${isEdit ? 'Digite se for redefinir a senha' : 'Mínimo de 12 caracteres'}"></div>
-        <div class="field" style="margin-top:10px"><label>Função no Sistema *</label>
-          <select required name="new_role">
-            <option value="Conferente" ${role === 'Conferente' ? 'selected' : ''}>Conferente (Apenas opera docas)</option>
-            <option value="Assistente" ${role === 'Assistente' ? 'selected' : ''}>Assistente (Cadastra e monitora)</option>
-            <option value="Supervisor" ${role === 'Supervisor' ? 'selected' : ''}>Supervisor (Acesso total)</option>
-          </select>
+        <div class="modal-body">
+            <div class="form-grid">
+                <div class="field full"><label>Nº Registro</label><input name="new_registro" type="text" placeholder="Ex: 12345" value="${esc(registro)}"></div>
+                <div class="field"><label>Nome *</label><input required name="new_nome" type="text" placeholder="Nome" value="${esc(firstName)}"></div>
+                <div class="field"><label>Sobrenome *</label><input required name="new_sobrenome" type="text" placeholder="Sobrenome" value="${esc(lastName)}"></div>
+                
+                <div class="field full"><label>Usuário (Login) *</label><input required name="new_username" type="text" placeholder="Ex: andre.costa" value="${esc(username)}" ${isEdit ? 'readonly style="background:#f3f6fa;color:#8396a7;pointer-events:none;"' : ''}></div>
+                
+                <div class="field"><label>${isEdit ? 'Nova Senha' : 'Senha *'}</label><input ${isEdit ? '' : 'required'} name="new_password" type="password" placeholder="Mínimo de 6 caracteres"></div>
+                <div class="field"><label>Confirmação de Senha ${isEdit ? '' : '*'}</label><input ${isEdit ? '' : 'required'} name="confirm_password" type="password" placeholder="Confirmar senha"></div>
+                
+                <div class="field full" style="margin-top:10px">
+                    <label>Função no Sistema *</label>
+                    <select required name="new_role">
+                        <option value="Conferente" ${role === 'Conferente' ? 'selected' : ''}>Conferente (Apenas opera docas)</option>
+                        <option value="Assistente" ${role === 'Assistente' ? 'selected' : ''}>Assistente (Cadastra e monitora)</option>
+                        <option value="Supervisor" ${role === 'Supervisor' ? 'selected' : ''}>Supervisor (Acesso total)</option>
+                    </select>
+                </div>
+            </div>
         </div>
-      </div>
-      <div class="modal-actions">
-        <button type="button" class="secondary-btn" data-action="manage-users">Voltar para lista</button>
-        <button class="primary-btn" type="submit">${isEdit ? 'Salvar Alterações' : 'Cadastrar Usuário'}</button>
-      </div>
+        <div class="modal-actions">
+            <button type="button" class="secondary-btn" data-action="manage-users">Voltar para lista</button>
+            <button class="primary-btn" type="submit">${isEdit ? 'Salvar Alterações' : 'Cadastrar Usuário'}</button>
+        </div>
     </form>
-  </div>`;
+    </div>`;
 }
 
 function openChangePasswordModal() {
