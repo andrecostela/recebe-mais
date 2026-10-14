@@ -1,84 +1,88 @@
 "use strict";
 
-/**
- * Define a URL base da API REST no backend (Render/Produção vs. Localhost).
- */
-const API_BASE_URL = location.hostname === "localhost" || location.hostname === "127.0.0.1" 
-  ? "" 
-  : "https://recebe-mais.onrender.com";
+// URL base do servidor na nuvem (Render). Em localhost a API é servida pela mesma origem.
+const API_BASE_URL = location.hostname === "localhost" || location.hostname === "127.0.0.1"
+    ? ""
+    : "https://recebe-mais.onrender.com";
 
-/**
- * Cliente HTTP unificado da aplicação Recebe+.
- * Transmite os cookies de sessão HTTP-Only e o token Anti-CSRF.
- * 
- * @param {string} path - Caminho do endpoint (ex: '/api/records')
- * @param {object} options - Opções da requisição Fetch
- * @returns {Promise<object>} Retorna a resposta JSON em caso de sucesso
- */
+const API_TIMEOUT_MS = 60000; // o Render gratuito pode levar ~50 s para "acordar"
+
 async function api(path, options = {}) {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    // Permite o envio/recebimento de cookies de sessão em requisições cross-origin (Render + GitHub Pages)
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      ...(state.csrf ? { "X-CSRF-Token": state.csrf } : {}),
-      ...(options.headers || {})
+    let response;
+    try {
+        response = await fetch(`${API_BASE_URL}${path}`, {
+            ...options,
+            // "include" permite enviar o cookie de sessão entre GitHub Pages e Render
+            credentials: "include",
+            signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(API_TIMEOUT_MS) : undefined,
+            headers: {
+                "Content-Type": "application/json",
+                ...(state.csrf ? { "X-CSRF-Token": state.csrf } : {}),
+                ...(options.headers || {})
+            }
+        });
+    } catch {
+        const error = new Error("Sem conexão com o servidor. Verifique a internet e tente novamente.");
+        error.network = true;
+        throw error;
     }
-  });
 
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.error || "Falha na comunicação com a API");
-  }
-  return payload;
+    // Lê como texto: respostas vazias ou HTML (502/504 do Render) não derrubam o parse
+    const text = await response.text();
+    let payload = {};
+    try { payload = text ? JSON.parse(text) : {}; } catch { payload = {}; }
+
+    if (!response.ok) {
+        const fallback = response.status >= 500
+            ? "Servidor indisponível no momento. Tente novamente em instantes."
+            : "Falha na API";
+        const error = new Error(payload.error || fallback);
+        error.status = response.status;
+        throw error;
+    }
+    return payload;
 }
 
-/**
- * Hidrata o estado global com a lista de recebimentos atualizada do servidor.
- */
 async function hydrateFromServer() {
-  try {
-    const payload = await api("/api/records");
-    state.records = payload.records;
-    state.apiOnline = true;
-    saveRecords();
+    try {
+        const payload = await api("/api/records");
+        state.records = payload.records;
+        state.apiOnline = true;
+            state.user = null;
+            state.role = null;
+            state.csrf = null;
+            if (typeof renderApp === "function") renderApp();
+        }
+    }
+}
+
+async function checkSession(attempt = 0) {
+    try {
+        const payload = await api("/api/me");
+        state.user = payload.user;
+        state.role = payload.user.role;
+        state.csrf = payload.csrf;
+        state.apiOnline = true;
+    } catch (error) {
+        // Só 401 significa "não logado". Falha de rede/servidor acordando: tenta de novo antes de desistir.
+        if (error.status !== 401 && attempt < 2) {
+            await new Promise(resolve => setTimeout(resolve, 4000));
+            return checkSession(attempt + 1);
+        }
+        state.user = null;
+        state.role = null;
+        state.csrf = null;
+    }
+    state.authChecked = true;
     if (typeof renderApp === "function") renderApp();
-  } catch {
-    state.apiOnline = false;
-  }
+    if (state.user) hydrateFromServer();
 }
 
-/**
- * Verifica a sessão do usuário autenticado e resgata as permissões/CSRF.
- */
-async function checkSession() {
-  try {
-    const payload = await api("/api/me");
-    state.user = payload.user;
-    state.role = payload.user.role;
-    state.csrf = payload.csrf;
-    state.apiOnline = true;
-  } catch {
-    state.user = null;
-    state.role = null;
-    state.csrf = null;
-  }
-  state.authChecked = true;
-  if (typeof renderApp === "function") renderApp();
-  if (state.user) hydrateFromServer();
-}
-
-/**
- * Matriz de Controle de Acesso Baseado em Perfis (RBAC).
- * 
- * @param {string} permission - Ação desejada ('create', 'transition', 'sheet')
- * @returns {boolean} Retorna true se a ação for permitida para a função ativa
- */
+// Atenção: isto só controla a interface. A autorização real é feita no servidor.
 function can(permission) {
-  if (state.role === "Supervisor") return true;
-  if (permission === "create") return ["Conferente", "Assistente"].includes(state.role);
-  if (permission === "transition") return state.role === "Conferente";
-  if (permission === "sheet") return false;
-  return Boolean(state.user);
+    if (state.role === "Supervisor") return true;
+    if (permission === "create") return ["Conferente", "Assistente"].includes(state.role);
+    if (permission === "transition") return state.role === "Conferente";
+    if (permission === "sheet") return false;
+    return Boolean(state.user);
 }
