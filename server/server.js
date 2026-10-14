@@ -47,6 +47,8 @@ const MIME = {
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
   ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".webmanifest": "application/manifest+json"
 };
 
 const pool = usePg
@@ -146,32 +148,383 @@ function readBody(req) {
     });
     req.on("error", reject);
   });
-const server = http.createServer(async (req, res) => {
-  let url;
+}
+
+function clientIp(req) {
+  const fwd = String(req.headers["x-forwarded-for"] || "").split(",").map(s => s.trim()).filter(Boolean);
+  if (PROXY_HOPS > 0 && fwd.length) return fwd[Math.max(0, fwd.length - PROXY_HOPS)];
+  return req.socket.remoteAddress || "unknown";
+}
+
+// CORS: só origens listadas em ALLOWED_ORIGINS recebem credenciais
+function applyCors(req, res) {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+    res.setHeader("Access-Control-Max-Age", "600");
+  }
+  res.setHeader("Vary", "Origin");
+}
+
+// ---------------------------------------------------------------------
+// 3. Senhas, usuários e sessões
+// ---------------------------------------------------------------------
+const DUMMY_SALT = "0".repeat(32);
+
+async function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = (await scrypt(String(password), salt, 64)).toString("hex");
+  return { salt, hash };
+}
+
+async function verifyPassword(password, user) {
   try {
-    url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+    const actual = await scrypt(String(password), user.salt, 64);
+    const expected = Buffer.from(user.hash, "hex");
+    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
   } catch {
-    res.writeHead(400);
-    return res.end();
+    return false;
   }
+}
+
+const COMMON_PASSWORDS = new Set([
+  "123456", "12345678", "123456789", "password", "senha123", "admin123", "recebeplus",
+  "mudar123", "1234567890", "qwertyuiop", "supervisorsenha", "admin12345678"
+]);
+
+function validatePasswordStrength(password) {
+  const pwd = String(password || "");
+  if (pwd.length < 12) throw new UserError("A senha deve possuir no mínimo 12 caracteres.");
+  if (COMMON_PASSWORDS.has(pwd.toLowerCase().trim())) {
+    throw new UserError("A senha escolhida é muito comum e insegura. Escolha uma frase-senha mais longa.");
+  }
+}
+
+function readUsersFile() {
   try {
-    if (url.pathname.startsWith("/api/")) {
-      applyCors(req, res);
-      if (req.method === "OPTIONS") { // preflight: responde ANTES de qualquer autenticação
-        res.writeHead(204);
-        return res.end();
-      }
-      await dbReady;
-      return await handleApi(req, res, url);
-    }
-    return serveStatic(req, res, url);
-  } catch (error) {
-    console.error(error);
-    if (!res.headersSent) return json(res, 500, { error: "Falha interna" });
-    res.end();
+    const parsed = JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
+    return Array.isArray(parsed.users) ? parsed.users : [];
+  } catch {
+    return [];
   }
-});
+}
 
-process.on("unhandledRejection", reason => console.error("Promise rejeitada sem tratamento:", reason));
+function writeUsersFile(users) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(USERS_FILE, JSON.stringify({ users }, null, 2), { mode: 0o600 });
+}
 
-server.listen(PORT, "0.0.0.0", () => console.log(`Recebe+ ativo na porta ${PORT}`));
+async function readUsers() {
+  if (usePg) return (await pool.query("SELECT * FROM usuarios")).rows; // erros propagam
+  return readUsersFile();
+}
+
+// Única porta de escrita de usuários: PostgreSQL quando há DATABASE_URL, arquivo caso contrário.
+async function saveUser({ username, name, role, salt, hash }) {
+  if (usePg) {
+    await pool.query(
+      `INSERT INTO usuarios (id, username, name, role, hash, salt) VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (username) DO UPDATE SET name = $3, role = $4, hash = $5, salt = $6`,
+      [crypto.randomUUID(), username, name, role, hash, salt]
+    );
+    return;
+  }
+  const users = readUsersFile();
+  const idx = users.findIndex(u => u.username.toLowerCase() === username.toLowerCase());
+  if (idx >= 0) users[idx] = { ...users[idx], name, role, salt, hash };
+  else users.push({ username, name, role, salt, hash, createdAt: new Date().toISOString() });
+  writeUsersFile(users);
+}
+
+// Somente modo arquivo (sem PostgreSQL)
+function ensureInitialUsersFile() {
+  const users = readUsersFile();
+  if (users.some(u => u.role === "Supervisor")) return;
+  const pwd = process.env.ADMIN_INITIAL_PASSWORD || crypto.randomBytes(12).toString("hex") + "Aa1!";
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(pwd, salt, 64).toString("hex");
+  users.unshift({ username: "admin", name: "Administrador do Sistema", role: "Supervisor", salt, hash, createdAt: new Date().toISOString() });
+  writeUsersFile(users);
+  console.log(`✅ Administrador inicial criado. Usuário: admin${process.env.ADMIN_INITIAL_PASSWORD ? "" : ` | Senha: ${pwd} (altere após o primeiro login)`}`);
+}
+if (!usePg) ensureInitialUsersFile();
+
+function safeDecode(value) {
+  try { return decodeURIComponent(value); } catch { return ""; }
+}
+
+function parseCookies(req) {
+  return Object.fromEntries(
+    String(req.headers.cookie || "").split(";")
+      .map(part => part.trim().split(/=(.*)/s).slice(0, 2))
+      .filter(([key]) => key)
+      .map(([key, value]) => [key, safeDecode(value || "")])
+  );
+}
+
+function getSession(req) {
+  const token = parseCookies(req).recebe_session;
+  const session = token ? sessions.get(token) : null;
+  if (!session || session.expiresAt < Date.now()) {
+    if (token) sessions.delete(token);
+    return null;
+  }
+  return { ...session, token };
+}
+
+// Entre domínios (GitHub Pages -> Render) o cookie precisa de SameSite=None; Secure
+function setSessionCookie(res, token, maxAge = SESSION_TTL / 1000) {
+  const attrs = IS_PROD ? "SameSite=None; Secure" : "SameSite=Lax";
+  res.setHeader("Set-Cookie", `recebe_session=${encodeURIComponent(token)}; HttpOnly; ${attrs}; Path=/; Max-Age=${maxAge}`);
+}
+
+function requireSession(req, res, { write = false } = {}) {
+  const session = getSession(req);
+  if (!session) {
+    json(res, 401, { error: "Autenticação necessária" });
+    return null;
+  }
+  if (write && !safeEqual(req.headers["x-csrf-token"], session.csrf)) {
+    json(res, 403, { error: "Sessão inválida" });
+    return null;
+  }
+  return session;
+}
+
+// Derruba as sessões de um usuário (troca de senha/papel). A sessão atual pode ser preservada.
+function invalidateUserSessions(username, keepToken = null, newRole = null) {
+  for (const [token, s] of sessions) {
+    if (s.username.toLowerCase() !== username.toLowerCase()) continue;
+    if (token === keepToken) {
+      if (newRole) s.role = newRole;
+    } else {
+      sessions.delete(token);
+    }
+  }
+}
+
+function isRateLimited(ip) {
+  const entry = loginAttempts.get(ip);
+  if (!entry) return false;
+  if (Date.now() - entry.since > LOGIN_WINDOW) {
+    loginAttempts.delete(ip);
+    return false;
+  }
+  return entry.count >= 5;
+}
+
+function registerFailure(ip) {
+  const now = Date.now();
+  const entry = loginAttempts.get(ip);
+  loginAttempts.set(ip, !entry || now - entry.since > LOGIN_WINDOW ? { count: 1, since: now } : { count: entry.count + 1, since: entry.since });
+}
+
+// ---------------------------------------------------------------------
+// 4. Banco de dados (PostgreSQL ou arquivo JSON)
+// ---------------------------------------------------------------------
+async function initDb() {
+  if (!usePg) return;
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS usuarios (
+        id VARCHAR(36) PRIMARY KEY,
+        username VARCHAR(60) UNIQUE NOT NULL,
+        name VARCHAR(100) NOT NULL,
+        role VARCHAR(20) NOT NULL,
+        hash VARCHAR(128) NOT NULL,
+        salt VARCHAR(32) NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS recebimentos (
+        id VARCHAR(36) PRIMARY KEY,
+        data TIMESTAMP WITH TIME ZONE NOT NULL,
+        origem VARCHAR(120) NOT NULL,
+        placa VARCHAR(10) NOT NULL,
+        motorista VARCHAR(120) NOT NULL,
+        doca VARCHAR(10) DEFAULT '—',
+        volumetria INT DEFAULT 0,
+        sla INT DEFAULT 60,
+        status VARCHAR(30) DEFAULT 'Em Trânsito',
+        inicio TIMESTAMP WITH TIME ZONE,
+        fim TIMESTAMP WITH TIME ZONE,
+        conferente VARCHAR(100) DEFAULT '—',
+        insumo_tipo TEXT,
+        insumo_qtd INT,
+        insumo_status TEXT,
+        insumo_obs TEXT,
+        insumos_lista JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS insumos_recebimento (
+        id VARCHAR(36) PRIMARY KEY,
+        recebimento_id VARCHAR(36) NOT NULL REFERENCES recebimentos(id) ON DELETE CASCADE,
+        tipo_insumo VARCHAR(50) NOT NULL,
+        quantidade INT NOT NULL CHECK (quantidade > 0),
+        condicao VARCHAR(30) DEFAULT '',
+        observacao TEXT,
+        foto_url TEXT,
+        criado_em TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS auditoria (
+        id VARCHAR(36) PRIMARY KEY,
+        timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        action VARCHAR(120) NOT NULL,
+        record_id VARCHAR(36),
+        placa VARCHAR(20),
+        role VARCHAR(60)
+      );
+      ALTER TABLE recebimentos ADD COLUMN IF NOT EXISTS foto_url TEXT;
+      ALTER TABLE auditoria ADD COLUMN IF NOT EXISTS actor VARCHAR(60);
+      ALTER TABLE auditoria ALTER COLUMN record_id TYPE VARCHAR(80);
+      CREATE INDEX IF NOT EXISTS idx_recebimentos_data ON recebimentos (data DESC);
+      CREATE INDEX IF NOT EXISTS idx_insumos_criado_em ON insumos_recebimento (criado_em);
+      CREATE INDEX IF NOT EXISTS idx_insumos_recebimento ON insumos_recebimento (recebimento_id);
+    `);
+
+    const count = await client.query("SELECT COUNT(*) FROM usuarios");
+    if (parseInt(count.rows[0].count, 10) === 0) {
+      let pwd = process.env.ADMIN_INITIAL_PASSWORD;
+      let generated = false;
+      try { validatePasswordStrength(pwd); } catch { pwd = crypto.randomBytes(12).toString("hex") + "Aa1!"; generated = true; }
+      const { salt, hash } = await hashPassword(pwd);
+      await client.query(
+        "INSERT INTO usuarios (id, username, name, role, hash, salt) VALUES ($1, $2, $3, $4, $5, $6)",
+        [crypto.randomUUID(), "admin", "Administrador do Sistema", "Supervisor", hash, salt]
+      );
+      console.log(generated
+        ? `✅ [PostgreSQL] Admin criado. Usuário: admin | Senha: ${pwd} (exibida uma única vez — altere no primeiro login; para definir a sua, use ADMIN_INITIAL_PASSWORD com 12+ caracteres)`
+        : "✅ [PostgreSQL] Admin criado com a senha de ADMIN_INITIAL_PASSWORD.");
+    }
+  } finally {
+    client.release();
+  }
+}
+const dbReady = initDb().catch(err => console.error("❌ Falha ao inicializar o PostgreSQL:", err));
+
+function nowAt(hour, minute = 0) {
+  const d = new Date();
+  d.setHours(hour, minute, 0, 0);
+  return d.toISOString();
+}
+
+// Dados de demonstração: apenas em desenvolvimento (modo arquivo)
+function seed() {
+  return [
+    { id: "D-101", data: nowAt(7, 20), origem: "CD Guarulhos", doca: "3", motorista: "Carlos Mendes", placa: "RFG-8J21", volumetria: 1860, inicio: nowAt(7, 42), fim: nowAt(8, 31), sla: 60, conferente: "Ana Souza", status: "Concluído", source: "server" },
+    { id: "D-102", data: nowAt(8, 10), origem: "Hub Campinas", doca: "5", motorista: "João Ribeiro", placa: "GHT-4C07", volumetria: 2430, inicio: nowAt(8, 28), fim: null, sla: 75, conferente: "Marcos Lima", status: "Em descarga", source: "server" },
+    { id: "D-103", data: nowAt(9, 0), origem: "CD Extrema", doca: "2", motorista: "Paulo Nunes", placa: "BXR-1D94", volumetria: 0, inicio: null, fim: null, sla: 45, conferente: "—", status: "Aguardando", source: "server" }
+  ];
+}
+
+function writeDb(db) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const temp = `${DATA_FILE}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(db, null, 2), { mode: 0o600 });
+  fs.renameSync(temp, DATA_FILE);
+}
+
+// Só recria dados se o arquivo NÃO existir. Arquivo corrompido gera erro (nunca sobrescreve).
+function readJsonDb() {
+  let raw;
+  try {
+    raw = fs.readFileSync(DATA_FILE, "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    const fresh = { records: IS_PROD ? [] : seed(), audit: [] };
+    writeDb(fresh);
+    return fresh;
+  }
+  let db;
+  try { db = JSON.parse(raw); } catch { throw new Error("recebimentos.json corrompido: restaure um backup antes de continuar."); }
+  if (!db || typeof db !== "object") db = {};
+  if (!Array.isArray(db.records)) db.records = [];
+  if (!Array.isArray(db.audit)) db.audit = [];
+  let changed = false;
+  db.records = db.records.map(record => {
+    const status = record.status === "Previsto" ? "Em Trânsito" : record.status === "Divergência" ? "Em Atraso" : record.status;
+    const doca = String(record.doca ?? "").replace(/^D/i, "").replace(/^0+(?=\d)/, "") || "—";
+    if (status !== record.status || doca !== record.doca) changed = true;
+    return { ...record, status, doca };
+  });
+  if (changed) writeDb(db);
+  return db;
+}
+
+function mapRecord(r) {
+  let insumos = r.insumos_lista ?? null;
+  if (typeof insumos === "string") { try { insumos = JSON.parse(insumos); } catch { insumos = null; } }
+  return {
+    id: r.id,
+    data: r.data ? new Date(r.data).toISOString() : new Date().toISOString(),
+    origem: r.origem,
+    placa: r.placa,
+    motorista: r.motorista,
+    doca: r.doca || "—",
+    volumetria: r.volumetria || 0,
+    sla: r.sla || 60,
+    status: r.status,
+    inicio: r.inicio ? new Date(r.inicio).toISOString() : null,
+    fim: r.fim ? new Date(r.fim).toISOString() : null,
+    conferente: r.conferente || "—",
+    insumo_tipo: r.insumo_tipo,
+    insumo_qtd: r.insumo_qtd,
+    insumo_status: r.insumo_status,
+    insumo_obs: r.insumo_obs,
+    insumos,
+    foto_url: r.foto_url || "",
+    source: "server" // sem isso o front trata o registro como local e deixa de chamar a API
+  };
+}
+
+// Erros do banco propagam (HTTP 500) — nunca viram "lista vazia"
+async function readDb({ withAudit = true } = {}) {
+  if (usePg) {
+    const recRes = await pool.query("SELECT * FROM recebimentos ORDER BY data DESC");
+    let audit = [];
+    if (withAudit) {
+      const auditRes = await pool.query("SELECT * FROM auditoria ORDER BY timestamp DESC LIMIT 100");
+      audit = auditRes.rows.map(a => ({
+        id: a.id,
+        timestamp: a.timestamp ? new Date(a.timestamp).toISOString() : null,
+        action: a.action,
+        recordId: a.record_id,
+        placa: a.placa,
+        role: a.role,
+        actor: a.actor || ""
+      }));
+    }
+    return { records: recRes.rows.map(mapRecord), audit };
+  }
+  return readJsonDb();
+}
+
+async function writeAudit(action, { recordId = "", placa = "", role = "", actor = "" } = {}) {
+  const entry = {
+    id: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    action: cleanText(action, 120),
+    recordId: cleanText(recordId, 80),
+    placa: cleanText(placa, 20),
+    role: cleanText(role, 60),
+    actor: cleanText(actor, 60)
+  };
+  if (usePg) {
+    await pool.query(
+      "INSERT INTO auditoria (id, timestamp, action, record_id, placa, role, actor) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+      [entry.id, entry.timestamp, entry.action, entry.recordId, entry.placa, entry.role, entry.actor]
+    );
+    return;
+  }
+  const db = readJsonDb();
+  db.audit.unshift(entry);
+  db.audit = db.audit.slice(0, 1000);
+  writeDb(db);
+}
+
+async function createRecordDb(record, session) {
+  if (usePg) {
+    aw
