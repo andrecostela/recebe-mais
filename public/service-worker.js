@@ -1,7 +1,7 @@
 "use strict";
 
 // Troque o número da versão a cada deploy para descartar caches antigos.
-const CACHE_NAME = "recebe-plus-v2";
+const CACHE_NAME = "recebe-plus-v3";
 
 // Caminhos relativos ao escopo do service worker (funcionam em "/" e em "/recebe-mais/")
 const ASSETS = [
