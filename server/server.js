@@ -880,3 +880,86 @@ async function handleApi(req, res, url) {
         sql += ` AND LOWER(r.conferente) LIKE $${params.length} ESCAPE '\\'`;
       }
       sql += " ORDER BY i.criado_em DESC LIMIT 2000";
+
+const result = await pool.query(sql, params);
+      return json(res, 200, { insumos: result.rows });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  return json(res, 404, { error: "Rota da API não encontrada" });
+}
+
+// ---------------------------------------------------------------------
+// 7. Arquivos estáticos (protegido contra path traversal)
+// ---------------------------------------------------------------------
+function serveStatic(req, res, url) {
+  if (req.method !== "GET" && req.method !== "HEAD") return json(res, 405, { error: "Método não permitido" });
+
+  let pathname;
+  try { pathname = decodeURIComponent(url.pathname); } catch { return json(res, 400, { error: "URL inválida" }); }
+  if (pathname.includes("\0")) return json(res, 400, { error: "URL inválida" });
+
+  let rel = pathname.replace(/^\/+/, "") || "index.html";
+  let baseDir = PUBLIC_DIR;
+  if (rel.startsWith("src/")) { baseDir = SRC_DIR; rel = rel.slice(4); }
+  else if (rel.startsWith("public/")) rel = rel.slice(7);
+
+  // O caminho FINAL (já resolvido) precisa estar dentro do diretório permitido
+  const filePath = path.resolve(baseDir, rel);
+  const ext = path.extname(filePath).toLowerCase();
+  if (!filePath.startsWith(baseDir + path.sep) || !MIME[ext] || path.basename(filePath).startsWith(".")) {
+    return json(res, 404, { error: "Arquivo não encontrado" });
+  }
+
+  fs.stat(filePath, (error, stat) => {
+    if (error || !stat.isFile()) return json(res, 404, { error: "Arquivo não encontrado" });
+    const headers = {
+      "Content-Type": MIME[ext],
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "same-origin",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+      "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' https://docs.google.com https://docs.googleusercontent.com; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+    };
+    if (path.basename(filePath) === "service-worker.js") headers["Cache-Control"] = "no-cache";
+    res.writeHead(200, headers);
+    if (req.method === "HEAD") return res.end();
+    const stream = fs.createReadStream(filePath);
+    stream.on("error", () => res.destroy());
+    stream.pipe(res);
+  });
+}
+
+// ---------------------------------------------------------------------
+// 8. Servidor HTTP
+// ---------------------------------------------------------------------
+const server = http.createServer(async (req, res) => {
+  let url;
+  try {
+    url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  } catch {
+    res.writeHead(400);
+    return res.end();
+  }
+  try {
+    if (url.pathname.startsWith("/api/")) {
+      applyCors(req, res);
+      if (req.method === "OPTIONS") { // preflight: responde ANTES de qualquer autenticação
+        res.writeHead(204);
+        return res.end();
+      }
+      await dbReady;
+      return await handleApi(req, res, url);
+    }
+    return serveStatic(req, res, url);
+  } catch (error) {
+    console.error(error);
+    if (!res.headersSent) return json(res, 500, { error: "Falha interna" });
+    res.end();
+  }
+});
+
+process.on("unhandledRejection", reason => console.error("Promise rejeitada sem tratamento:", reason));
+
+server.listen(PORT, "0.0.0.0", () => console.log(`Recebe+ ativo na porta ${PORT}`));
